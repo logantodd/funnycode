@@ -1,0 +1,112 @@
+from pathlib import Path
+import pandas as pd
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QFileDialog, QTableView,
+    QSplitter, QTabWidget, QTextEdit, QStatusBar, QPushButton, QWidget, QVBoxLayout
+)
+from PySide6.QtCore import Qt, QAbstractTableModel, QThread, Signal
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+import matplotlib.pyplot as plt
+
+class DataFrameModel(QAbstractTableModel):
+    def __init__(self, df=pd.DataFrame()):
+        super().__init__()
+        self._df = df
+
+    def rowCount(self, parent=None):  return len(self._df.index)
+    def columnCount(self, parent=None): return len(self._df.columns)
+    def data(self, index, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole:
+            return str(self._df.iat[index.row(), index.column()])
+        return None
+    def headerData(self, section, orient, role):
+        if role == Qt.DisplayRole:
+            return self._df.columns[section] if orient == Qt.Horizontal else section
+
+class Worker(QThread):
+    done = Signal(pd.DataFrame, pd.DataFrame)     # stops_df, summary_df
+    def __init__(self, df): super().__init__(); self.df = df
+    def run(self):
+        # ➜ call your existing detection routine here
+        stops, summary = find_faulty_trains(self.df)  # your function
+        self.done.emit(stops, summary)
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Faulty Train Detector")
+        self.table = QTableView()
+        self.log   = QTextEdit(readOnly=True)
+        self.canvas = FigureCanvas(plt.figure(figsize=(5,4)))
+
+        tabs = QTabWidget(); tabs.addTab(self.canvas, "Visualization"); tabs.addTab(self.log, "Log / Summary")
+        split = QSplitter(); split.addWidget(self.table); split.addWidget(tabs)
+        self.setCentralWidget(split)
+        self.setStatusBar(QStatusBar())
+
+        # toolbar actions
+        openAct = self.menuBar().addAction("Open CSV…")
+        openAct.triggered.connect(self.open_csv)
+        saveAct = self.menuBar().addAction("Select Output Folder…")
+        saveAct.triggered.connect(self.choose_folder)
+        runAct  = self.menuBar().addAction("Run Analysis")
+        runAct.triggered.connect(self.run_analysis)
+
+        # drag‑and‑drop
+        self.setAcceptDrops(True)
+        self.df = pd.DataFrame()
+        self.out_dir = Path.cwd()
+
+    # Drag‑and‑drop handlers
+    def dragEnterEvent(self, e): 
+        if e.mimeData().hasUrls(): e.acceptProposedAction()
+    def dropEvent(self, e):
+        path = Path(e.mimeData().urls()[0].toLocalFile())
+        if path.suffix.lower() == ".csv":
+            self.load_csv(path)
+
+    def open_csv(self):
+        file, _ = QFileDialog.getOpenFileName(self, "CSV", "", "CSV (*.csv)")
+        if file: self.load_csv(Path(file))
+
+    def load_csv(self, path):
+        self.df = pd.read_csv(path)
+        self.table.setModel(DataFrameModel(self.df))
+        self.statusBar().showMessage(f"Loaded {path.name}")
+
+    def choose_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Output folder")
+        if folder:
+            self.out_dir = Path(folder)
+            self.statusBar().showMessage(f"Output → {self.out_dir}")
+
+    def run_analysis(self):
+        if self.df.empty: return
+        self.thread = Worker(self.df.copy())
+        self.thread.done.connect(self.handle_results)
+        self.thread.start()
+        self.statusBar().showMessage("Processing…")
+
+    def handle_results(self, stops, summary):
+        # write CSV outputs
+        stops.to_csv(self.out_dir / "stopped_rows.csv", index=False)
+        summary.to_csv(self.out_dir / "train_summary.csv", index=False)
+        # log
+        self.log.append(f"Saved outputs to {self.out_dir}")
+        self.log.append(str(summary.head()))
+        # quick viz example: bar chart of #faults per train
+        self.canvas.figure.clear()
+        ax = self.canvas.figure.add_subplot(111)
+        summary.set_index("train_id")["num_faults"].plot(kind="bar", ax=ax)
+        ax.set_title("Number of faults per train")
+        ax.set_ylabel("Count")
+        self.canvas.draw()
+        self.statusBar().showMessage("Done!", 5000)
+
+def main():
+    app = QApplication([])
+    mw = MainWindow(); mw.resize(1200, 700); mw.show()
+    app.exec()
+
+if __name__ == "__main__":
+    main()
